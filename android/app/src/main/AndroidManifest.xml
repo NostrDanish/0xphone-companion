@@ -5,7 +5,7 @@
 
     <application
         android:label="0xPhone Companion"
-        android:theme="@style/Theme.AppCompat.Light.NoActionBar"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar"
         android:usesCleartextTraffic="true">
         <activity
             android:name=".MainActivity"
