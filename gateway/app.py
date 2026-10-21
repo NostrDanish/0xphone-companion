@@ -1,13 +1,18 @@
 """FastAPI secure task gateway (SPEC section A).
 
 Run:  uvicorn gateway.app:app --reload
-Auth: admin endpoints require header `X-Admin-Token: $GATEWAY_ADMIN_TOKEN`.
+Auth: client /jobs* endpoints require `Authorization: Bearer $GATEWAY_TOKEN`
+      (or `X-Gateway-Token`); admin endpoints require
+      `X-Admin-Token: $GATEWAY_ADMIN_TOKEN`.
 """
 from __future__ import annotations
 
+import hmac
+import logging
 import os
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.responses import JSONResponse
 
 from . import policy
 from .db import Database
@@ -18,6 +23,12 @@ from .models import (
     WorkerRegisterResponse,
 )
 
+logger = logging.getLogger("gateway")
+
+# Client hosts treated as loopback. "testclient" is the host Starlette's
+# TestClient reports, so the in-process dev/test workflow keeps working.
+LOOPBACK_CLIENT_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "testclient"})
+
 
 def create_app(db_path: str = ":memory:") -> FastAPI:
     app = FastAPI(title="0xPhone Companion Gateway", version="0.1.0")
@@ -26,6 +37,48 @@ def create_app(db_path: str = ":memory:") -> FastAPI:
         paid_enabled=os.environ.get("GATEWAY_PAID_ENABLED", "0") == "1")
     app.state.db = db
     app.state.config = config
+
+    # ---- client auth (owner pairing token) ---------------------------------
+    # All /jobs* endpoints are owner-only. If GATEWAY_TOKEN is unset the
+    # loopback dev workflow keeps working, but any non-loopback client is
+    # refused: an unauthenticated gateway must never be reachable off-host
+    # (audit H9/PC-01 — /jobs/{id}/approve releases confidential jobs).
+    if not os.environ.get("GATEWAY_TOKEN"):
+        logger.warning(
+            "GATEWAY_TOKEN is unset: /jobs* endpoints are UNAUTHENTICATED for "
+            "loopback clients and REFUSED for non-loopback clients. Set "
+            "GATEWAY_TOKEN before binding beyond loopback (tunnel deploys).")
+
+    @app.middleware("http")
+    async def require_gateway_token(request: Request, call_next):
+        if not request.url.path.startswith("/jobs"):
+            return await call_next(request)
+        token = os.environ.get("GATEWAY_TOKEN")
+        if token:
+            provided = request.headers.get("x-gateway-token")
+            auth = request.headers.get("authorization", "")
+            if not provided and auth.lower().startswith("bearer "):
+                provided = auth[len("bearer "):].strip()
+            if not provided or not hmac.compare_digest(provided, token):
+                db.audit("client_auth_denied", actor="client", job_id=None,
+                         detail={"path": request.url.path,
+                                 "reason": "missing or invalid gateway token"})
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "missing or invalid gateway token"})
+        else:
+            host = request.client.host if request.client else ""
+            if host not in LOOPBACK_CLIENT_HOSTS:
+                logger.error(
+                    "REFUSING non-loopback request to %s from %s: "
+                    "GATEWAY_TOKEN is unset; refusing to serve non-loopback "
+                    "clients without an owner token",
+                    request.url.path, host)
+                return JSONResponse(
+                    status_code=503,
+                    content={"detail": "GATEWAY_TOKEN not configured; "
+                                       "refusing non-loopback clients"})
+        return await call_next(request)
 
     # ---- dependencies ------------------------------------------------------
     def get_db() -> Database:
