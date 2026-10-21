@@ -1,5 +1,6 @@
 package com.oxphone.companion.net
 
+import com.oxphone.companion.BuildConfig
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
 import okhttp3.OkHttpClient
@@ -155,10 +156,24 @@ interface GatewayApi {
 object GatewayClient {
     /**
      * @param baseUrl e.g. "http://10.0.2.2:8000/" (emulator → host loopback).
+     *
+     * Every request carries the owner pairing token
+     * (`Authorization: Bearer <GATEWAY_TOKEN>`) injected at build time via
+     * `local.properties` / env — the gateway rejects /jobs* calls without it
+     * once `GATEWAY_TOKEN` is configured server-side.
      */
     fun create(baseUrl: String): GatewayApi {
         val json = Json { ignoreUnknownKeys = true }
-        val client = OkHttpClient.Builder().build()
+        val client = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val request = chain.request().newBuilder().apply {
+                    if (BuildConfig.GATEWAY_TOKEN.isNotEmpty()) {
+                        header("Authorization", "Bearer ${BuildConfig.GATEWAY_TOKEN}")
+                    }
+                }.build()
+                chain.proceed(request)
+            }
+            .build()
         return Retrofit.Builder()
             .baseUrl(baseUrl)
             .client(client)

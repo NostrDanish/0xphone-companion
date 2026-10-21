@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Debug builds only: allow cleartext so the emulator can still reach
+         the dev gateway at http://10.0.2.2:8000. Release builds inherit
+         usesCleartextTraffic="false" from the main manifest. -->
+    <application android:usesCleartextTraffic="true" />
+</manifest>
