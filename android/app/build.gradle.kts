@@ -15,11 +15,16 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "0.1.0"
-        // Token is never committed; provide via local.properties or env.
+        // Tokens are never committed; provide via local.properties or env.
         val adminToken = providers.gradleProperty("GATEWAY_ADMIN_TOKEN")
             .orElse(System.getenv("GATEWAY_ADMIN_TOKEN") ?: "")
             .get()
         buildConfigField("String", "GATEWAY_ADMIN_TOKEN", "\"$adminToken\"")
+        // Owner pairing token sent as `Authorization: Bearer` on every call.
+        val gatewayToken = providers.gradleProperty("GATEWAY_TOKEN")
+            .orElse(System.getenv("GATEWAY_TOKEN") ?: "")
+            .get()
+        buildConfigField("String", "GATEWAY_TOKEN", "\"$gatewayToken\"")
     }
 
     buildFeatures {

@@ -7,12 +7,14 @@ import java.io.PrintWriter
 import java.io.StringWriter
 import kotlin.system.exitProcess
 
-/** Debug-phase crash reporter: any uncaught exception relaunches into
+/** Debug-only crash reporter: any uncaught exception relaunches into
  *  CrashActivity, which displays the full stack trace so it can be
- *  copied and reported. Remove for release builds. */
+ *  copied and reported. Installed only when BuildConfig.DEBUG is true —
+ *  release builds keep the platform default handler. */
 class CompanionApplication : Application() {
     override fun onCreate() {
         super.onCreate()
+        if (!BuildConfig.DEBUG) return
         Thread.setDefaultUncaughtExceptionHandler { _, throwable ->
             val sw = StringWriter()
             throwable.printStackTrace(PrintWriter(sw))

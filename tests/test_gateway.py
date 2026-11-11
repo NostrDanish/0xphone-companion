@@ -6,7 +6,9 @@ Covers the server-side MVP acceptance checks:
   3. Cost control (paid calls denied when disabled / budget exhausted)
   4. Reliability: idempotent job claims on reconnect
   5. Credential scoping + revocation
+  6. Client auth: owner pairing token (GATEWAY_TOKEN) on all /jobs* endpoints
 """
+import asyncio
 import os
 
 import pytest
@@ -18,6 +20,10 @@ os.environ["GATEWAY_ADMIN_TOKEN"] = ADMIN
 from gateway.app import create_app  # noqa: E402
 
 AUTH = {"X-Admin-Token": ADMIN}
+
+OWNER = "owner-pairing-token"
+OWNER_BEARER = {"Authorization": f"Bearer {OWNER}"}
+OWNER_HEADER = {"X-Gateway-Token": OWNER}
 
 
 @pytest.fixture()
@@ -287,6 +293,98 @@ def test_admin_endpoints_require_token(client):
     assert client.post("/workers/register", json={}).status_code == 401
     r = client.get("/audit", headers=AUTH)
     assert r.status_code == 200
+
+
+# --------------------------------------------------------------------------
+# 6. Client auth: GATEWAY_TOKEN protects all /jobs* endpoints (audit H9)
+# --------------------------------------------------------------------------
+
+@pytest.fixture()
+def authed_client(monkeypatch):
+    monkeypatch.setenv("GATEWAY_TOKEN", OWNER)
+    app = create_app(":memory:")
+    with TestClient(app) as c:
+        yield c
+
+
+def test_jobs_endpoints_reject_missing_or_wrong_token(authed_client):
+    # every client endpoint, including the human-in-the-loop approve gate
+    for r in (
+        authed_client.post("/jobs", json={}),
+        authed_client.get("/jobs/job_x"),
+        authed_client.post("/jobs/job_x/cancel"),
+        authed_client.post("/jobs/job_x/approve"),
+        authed_client.post("/jobs/job_x/claim", json={}),
+        authed_client.post("/jobs/job_x/complete", json={}),
+    ):
+        assert r.status_code == 401, r.text
+    assert authed_client.post(
+        "/jobs", json={},
+        headers={"Authorization": "Bearer wrong"}).status_code == 401
+    assert authed_client.get(
+        "/jobs/job_x",
+        headers={"X-Gateway-Token": "wrong"}).status_code == 401
+    # denials land in the audit log
+    audit = authed_client.get("/audit", headers=AUTH).json()
+    assert any(e["event"] == "client_auth_denied" for e in audit)
+
+
+def test_jobs_endpoints_accept_bearer_and_x_gateway_token(authed_client):
+    r = authed_client.post("/jobs", json={
+        "task_type": "summarize", "payload_ref": "mem://note/1",
+        "data_classification": "public",
+        "requested_capabilities": ["summarize"],
+        "budget_cents": 0, "deadline_s": 600},
+        headers=OWNER_BEARER)
+    assert r.status_code == 201, r.text
+    job_id = r.json()["job_id"]
+    r = authed_client.get(f"/jobs/{job_id}", headers=OWNER_HEADER)
+    assert r.status_code == 200
+    r = authed_client.post(f"/jobs/{job_id}/cancel", headers=OWNER_BEARER)
+    assert r.status_code == 200
+
+
+def test_admin_endpoints_unaffected_by_gateway_token(authed_client):
+    # admin surface still gated solely by X-Admin-Token
+    assert authed_client.get("/audit").status_code == 401
+    assert authed_client.get("/audit", headers=AUTH).status_code == 200
+
+
+def test_unset_gateway_token_keeps_loopback_dev_workflow(client, monkeypatch):
+    monkeypatch.delenv("GATEWAY_TOKEN", raising=False)
+    # TestClient presents as a loopback-class client: no token needed
+    assert submit(client).status_code == 201
+
+
+def test_unset_gateway_token_refuses_non_loopback(monkeypatch):
+    monkeypatch.delenv("GATEWAY_TOKEN", raising=False)
+    app = create_app(":memory:")
+
+    async def call_as_remote():
+        scope = {
+            "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+            "method": "GET", "scheme": "http", "path": "/jobs/job_x",
+            "raw_path": b"/jobs/job_x", "query_string": b"", "root_path": "",
+            "headers": [], "client": ("192.168.1.50", 51000),
+            "server": ("testserver", 80),
+        }
+        result = {}
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message):
+            if message["type"] == "http.response.start":
+                result["status"] = message["status"]
+            elif message["type"] == "http.response.body":
+                result["body"] = result.get("body", b"") + message["body"]
+
+        await app(scope, receive, send)
+        return result
+
+    r = asyncio.run(call_as_remote())
+    assert r["status"] == 503
+    assert b"GATEWAY_TOKEN" in r["body"]
 
 
 # --------------------------------------------------------------------------
